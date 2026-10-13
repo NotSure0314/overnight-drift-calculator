@@ -1,0 +1,19 @@
+{
+  "name": "overnight-drift-calculator",
+  "version": "1.0.0",
+  "description": "Hypothetical returns calculator for buying stocks at market close and selling at the next market open.",
+  "main": "server.js",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "node --check server.js && node --check api/index.js && node --check public/app.js",
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1"
+  }
+}

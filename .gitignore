@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+.env.*
+.env*.local
+!.env.example
+
+# Vercel & Build artifacts
+.vercel/
+dist/
+build/
+.output/
+
+# OS metadata
+.DS_Store
+*.log

@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Overnight Drift — Close-to-Open Stock Return Calculator</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Translucent Floating Chrome Header (Apple Material & Depth) -->
+  <header class="top-chrome" role="banner">
+    <div class="chrome-inner">
+      <div class="brand">
+        <span class="brand-glyph" aria-hidden="true">◐</span>
+        <div>
+          <h1 class="brand-title">Overnight Drift</h1>
+          <p class="brand-subtitle">Buy at Market Close · Sell at Next Open (Start Date → Current)</p>
+        </div>
+      </div>
+      <div class="provider-pill" id="provider-status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="provider-label">Checking Data Feed…</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="app-container">
+    <!-- Hero & Purpose Banner -->
+    <section class="intro-card surface-card" aria-labelledby="intro-heading">
+      <div class="intro-content">
+        <h2 id="intro-heading" class="section-display">Overnight Return Simulator</h2>
+        <p class="intro-copy">
+          Simulates buying each selected stock at the 4:00 PM ET closing bell and selling at the next trading day’s 9:30 AM ET opening bell for <strong>every trading night from your Start Date up to Current</strong>.
+        </p>
+      </div>
+    </section>
+
+    <!-- Configuration Form -->
+    <form id="calculator-form" class="config-grid" novalidate>
+      <!-- Left Column: Capital & Date -->
+      <section class="surface-card control-panel" aria-labelledby="params-heading">
+        <div class="panel-header">
+          <h2 id="params-heading" class="panel-title">1. Capital &amp; Start Date</h2>
+          <span class="Allocation-badge" id="allocation-summary-badge">Equal Split Allocation</span>
+        </div>
+
+        <!-- Investment Amount Input -->
+        <div class="field-group">
+          <label for="investment-amount" class="field-label">
+            Total Investment Amount (USD) <span class="required-star" aria-hidden="true">*</span>
+          </label>
+          <div class="currency-input-wrap">
+            <span class="currency-prefix" aria-hidden="true">$</span>
+            <input
+              type="number"
+              id="investment-amount"
+              name="investmentAmount"
+              min="1"
+              step="any"
+              value="1000"
+              required
+              inputmode="decimal"
+              aria-describedby="amount-hint amount-error"
+              aria-errormessage="amount-error"
+            />
+          </div>
+          <p id="amount-hint" class="field-hint">
+            Minimum $1.00. Default $1,000.00 split equally across selected tickers (or customize per stock below).
+          </p>
+          <div id="amount-error" class="error-msg" role="alert">
+            <span aria-hidden="true">⚠️</span> <span class="error-text">Enter a valid USD amount of at least $1.00.</span>
+          </div>
+        </div>
+
+        <!-- Compound Interest Checkmark (ON by default) -->
+        <div class="field-group">
+          <label class="compound-check-card selected" for="compound-checkbox" id="compound-card-label">
+            <input
+              type="checkbox"
+              id="compound-checkbox"
+              class="stock-checkbox"
+              checked
+            />
+            <div class="compound-check-copy">
+              <div class="compound-title-row">
+                <span class="compound-title">Compound Overnight Returns</span>
+                <span class="compound-pill" id="compound-status-pill">Compounding ON</span>
+              </div>
+              <p class="compound-desc" id="compound-explanation">
+                Reinvests your updated balance every night (e.g., if $1,000 grows to $1,002 on Night 1, Night 2 invests $1,002 instead of $1,000).
+              </p>
+            </div>
+          </label>
+        </div>
+
+        <!-- Allocation Mode Segmented Control -->
+        <div class="field-group">
+          <span class="field-label" id="allocation-mode-label">Allocation Method</span>
+          <div class="segmented-control" role="radiogroup" aria-labelledby="allocation-mode-label">
+            <button
+              type="button"
+              role="radio"
+              aria-checked="true"
+              class="segment-btn active"
+              data-mode="equal"
+              id="mode-equal-btn"
+            >
+              Equal Split
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked="false"
+              class="segment-btn"
+              data-mode="custom"
+              id="mode-custom-btn"
+            >
+              Per-Stock Custom ($)
+            </button>
+          </div>
+          <p class="field-hint" id="allocation-explanation">
+            <strong>Active Rule:</strong> Total investment is divided equally among all selected stocks ($142.86 per stock for 7 stocks).
+          </p>
+        </div>
+
+        <!-- Start Date Input -->
+        <div class="field-group">
+          <label for="start-date" class="field-label">
+            Start Date (First Buy at Close) <span class="required-star" aria-hidden="true">*</span>
+          </label>
+          <input
+            type="date"
+            id="start-date"
+            name="startDate"
+            required
+            aria-describedby="date-hint date-error"
+            aria-errormessage="date-error"
+          />
+          <div class="quick-dates" aria-label="Preset past trading dates">
+            <span class="quick-dates-label">Quick pick:</span>
+            <button type="button" class="chip-btn" data-preset-offset="5">1 Week Ago</button>
+            <button type="button" class="chip-btn" data-preset-offset="21">1 Month Ago</button>
+            <button type="button" class="chip-btn" data-preset-offset="63">3 Months Ago</button>
+            <button type="button" class="chip-btn" data-preset-ytd="true">YTD (Jan 2)</button>
+            <button type="button" class="chip-btn" data-preset-offset="252">1 Year Ago</button>
+          </div>
+          <p id="date-hint" class="field-hint">
+            Trades every overnight session (Close → Next Open) from this Start Date up to the most recent trading day.
+          </p>
+          <div id="date-error" class="error-msg" role="alert">
+            <span aria-hidden="true">⚠️</span> <span class="error-text">Please choose a valid past trading day (not a weekend, holiday, or future/unclosed date).</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Column: Stock Selection & Custom Ticker -->
+      <section class="surface-card control-panel" aria-labelledby="stocks-heading">
+        <div class="panel-header">
+          <div>
+            <h2 id="stocks-heading" class="panel-title">2. Stock Selection</h2>
+            <p class="panel-subtitle" id="selection-counter">7 of 7 stocks selected</p>
+          </div>
+          <div class="bulk-actions">
+            <button type="button" class="text-btn" id="select-all-btn">Select All</button>
+            <span aria-hidden="true" class="divider-dot">·</span>
+            <button type="button" class="text-btn" id="clear-all-btn">Clear</button>
+          </div>
+        </div>
+
+        <!-- Stock Multi-Select Checkboxes -->
+        <div
+          id="stock-list"
+          class="stock-grid"
+          role="group"
+          aria-labelledby="stocks-heading"
+          aria-describedby="stocks-error"
+        >
+          <!-- Populated dynamically via app.js -->
+        </div>
+
+        <div id="stocks-error" class="error-msg" role="alert">
+          <span aria-hidden="true">⚠️</span> <span class="error-text">Select at least one stock ticker to run the calculation.</span>
+        </div>
+
+        <!-- Add Custom Ticker Input -->
+        <div class="custom-ticker-box">
+          <label for="custom-ticker-input" class="field-label">Add Custom Ticker Symbol</label>
+          <div class="custom-ticker-row">
+            <input
+              type="text"
+              id="custom-ticker-input"
+              placeholder="e.g. AAPL, MSFT, TSLA, BRK.B"
+              maxlength="8"
+              autocomplete="off"
+              spellcheck="false"
+              aria-describedby="custom-ticker-hint custom-ticker-error"
+              aria-errormessage="custom-ticker-error"
+            />
+            <button type="button" id="add-ticker-btn" class="secondary-btn">
+              + Add Ticker
+            </button>
+          </div>
+          <p id="custom-ticker-hint" class="field-hint">
+            Standard US exchange symbols (1–5 letters, optional class suffix like <code>.B</code>).
+          </p>
+          <div id="custom-ticker-error" class="error-msg" role="alert">
+            <span aria-hidden="true">⚠️</span> <span class="error-text" id="custom-ticker-error-text">Invalid ticker symbol.</span>
+          </div>
+        </div>
+
+        <!-- Primary Action Button -->
+        <div class="submit-row">
+          <button type="submit" id="calculate-btn" class="primary-btn">
+            <span class="btn-label" id="calculate-btn-text">Calculate Overnight Returns</span>
+            <span class="spinner" id="loading-spinner" hidden aria-hidden="true"></span>
+          </button>
+        </div>
+      </section>
+    </form>
+
+    <!-- Status / Alert Banner for API Errors, Rate Limits, or Warnings -->
+    <div id="status-banner" class="status-banner" role="alert" hidden>
+      <div class="status-icon" id="status-icon" aria-hidden="true">⚠️</div>
+      <div class="status-body">
+        <strong id="status-title" class="status-title">Notice</strong>
+        <p id="status-message" class="status-message"></p>
+      </div>
+      <button type="button" id="dismiss-status-btn" class="icon-close-btn" aria-label="Dismiss alert">✕</button>
+    </div>
+
+    <!-- Results Section -->
+    <section id="results-section" class="results-section" aria-labelledby="results-heading" hidden>
+      <!-- Total Portfolio Summary Cards -->
+      <div class="summary-header">
+        <div>
+          <h2 id="results-heading" class="section-display">Portfolio Overnight Summary</h2>
+          <p class="results-meta" id="results-subtitle">
+            Bought at Close · Sold at Next Open (Start Date → Current)
+          </p>
+        </div>
+        <span class="source-pill" id="data-source-badge">Source: Market Data API</span>
+      </div>
+
+      <div class="summary-cards" role="region" aria-label="Total Portfolio Metrics">
+        <article class="metric-card surface-card">
+          <span class="metric-label">Total Invested</span>
+          <strong class="metric-value" id="summary-invested">$0.00</strong>
+          <span class="metric-sub" id="summary-allocation-note">Equal allocation</span>
+        </article>
+
+        <article class="metric-card surface-card">
+          <span class="metric-label">Total Final Value</span>
+          <strong class="metric-value" id="summary-final-value">$0.00</strong>
+          <span class="metric-sub" id="summary-final-note">Compounded across nights</span>
+        </article>
+
+        <article class="metric-card surface-card" id="card-gain-loss">
+          <span class="metric-label">Total Gain / Loss ($)</span>
+          <strong class="metric-value" id="summary-gain-loss">$0.00</strong>
+          <span class="metric-sub" id="summary-direction-label">Net overnight P&amp;L</span>
+        </article>
+
+        <article class="metric-card surface-card" id="card-return-pct">
+          <span class="metric-label">Overall Return (%)</span>
+          <strong class="metric-value" id="summary-return-pct">0.00%</strong>
+          <span class="metric-sub">Portfolio weighted return</span>
+        </article>
+      </div>
+
+      <!-- Detailed Per-Stock Breakdown Table -->
+      <div class="table-card surface-card">
+        <div class="table-header-bar">
+          <h3 class="panel-title">Per-Stock Execution Breakdown</h3>
+          <span class="table-caption-note" id="table-mode-caption">Compounding ON: Reinvesting full balance each night from Start Date to Current.</span>
+        </div>
+
+        <div class="table-container">
+          <table id="results-table" aria-label="Overnight stock return calculations">
+            <thead>
+              <tr>
+                <th scope="col">Ticker</th>
+                <th scope="col">Buy Date</th>
+                <th scope="col" class="num-col">Close Price</th>
+                <th scope="col" class="num-col">Shares</th>
+                <th scope="col">Sell Date</th>
+                <th scope="col" class="num-col">Open Price</th>
+                <th scope="col" class="num-col">Final Value</th>
+                <th scope="col" class="num-col">Gain/Loss ($)</th>
+                <th scope="col" class="num-col">Return (%)</th>
+              </tr>
+            </thead>
+            <tbody id="results-tbody">
+              <!-- Populated dynamically -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Mandatory Financial Disclaimer -->
+    <footer class="disclaimer-card surface-card" role="contentinfo">
+      <div class="disclaimer-inner">
+        <span class="disclaimer-badge">Important Financial Disclaimer</span>
+        <p class="disclaimer-text">
+          <strong>Hypothetical Performance &amp; No Financial Advice:</strong> All calculations, share counts, and returns displayed on this website are strictly hypothetical and provided for educational and informational purposes only. Calculations assume execution at the exact official regular-session closing price and the following trading day’s official opening auction price, permit fractional shares, and <strong>ignore brokerage commissions, SEC/FINRA regulatory fees, bid-ask spreads, overnight margin interest, taxes, and market slippage</strong>. Past overnight performance is not indicative of future results. Nothing in this tool constitutes investment, legal, or tax advice.
+        </p>
+      </div>
+    </footer>
+  </main>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
