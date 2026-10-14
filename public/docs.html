@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Overnight Drift API — Documentation &amp; Reference</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    .docs-container {
+      max-width: 68rem;
+      margin: 0 auto;
+      padding: 2rem 1.5rem 5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 2rem;
+    }
+    .endpoint-card {
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .endpoint-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .method-badge {
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.25rem 0.65rem;
+      border-radius: 0.35rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .method-get { background: var(--gain-bg); color: var(--gain-fg); border: 1px solid var(--gain-border); }
+    .method-post { background: var(--accent-blue-soft); color: var(--accent-blue); border: 1px solid var(--accent-blue); }
+    .endpoint-path {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 1.05rem;
+      font-weight: 600;
+    }
+    .code-block {
+      background: var(--surface-subtle);
+      border: 1px solid var(--surface-border);
+      border-radius: var(--radius-md);
+      padding: 1rem 1.25rem;
+      overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      color: var(--text-primary);
+    }
+    .tab-row {
+      display: flex;
+      gap: 0.5rem;
+      border-bottom: 1px solid var(--surface-border);
+      padding-bottom: 0.5rem;
+    }
+    .tab-btn {
+      appearance: none;
+      border: none;
+      background: none;
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      padding: 0.35rem 0.75rem;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+    }
+    .tab-btn.active {
+      background: var(--surface-elevated);
+      color: var(--text-primary);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+  </style>
+</head>
+<body>
+  <header class="top-chrome" role="banner">
+    <div class="chrome-inner">
+      <div class="brand">
+        <span class="brand-glyph" aria-hidden="true">◐</span>
+        <div>
+          <h1 class="brand-title">Overnight Drift API</h1>
+          <p class="brand-subtitle">REST API Reference &amp; Developer Guide</p>
+        </div>
+      </div>
+      <div style="display: flex; gap: 0.75rem; align-items: center;">
+        <a href="/" class="chip-btn" style="text-decoration: none; padding: 0.4rem 0.9rem;">← Web Calculator</a>
+        <div class="provider-pill">
+          <span class="status-dot"></span>
+          <span>API v1.0.0 Online</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="docs-container">
+    <section class="surface-card intro-card">
+      <h2 class="section-display">API Quickstart</h2>
+      <p class="intro-copy">
+        The Overnight Drift API provides programmatic access to Close-to-Open return calculations, historical night-by-night compounding, top-performer rankings, and portfolio optimization for US equities.
+      </p>
+      <div style="margin-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+        <span class="source-pill">CORS: Enabled (Any Origin)</span>
+        <span class="source-pill">Auth: Public / Optional API Key</span>
+        <span class="source-pill">Base URL: <code>https://&lt;your-domain&gt;/api</code></span>
+      </div>
+    </section>
+
+    <!-- Endpoint 1: Single Ticker -->
+    <article class="surface-card endpoint-card">
+      <div class="endpoint-header">
+        <span class="method-badge method-get">GET</span>
+        <span class="endpoint-path">/api/overnight/:ticker</span>
+      </div>
+      <p class="intro-copy">
+        Fetches the complete overnight drift performance (win rate, return %, initial close, latest open, and final balance) for a single ticker.
+      </p>
+      <div class="field-hint">
+        <strong>Parameters:</strong> <code>startDate</code> (YYYY-MM-DD, optional), <code>compound</code> (boolean, default <code>true</code>), <code>amount</code> (number, default <code>1000</code>).
+      </div>
+      <div class="code-block">
+curl -s "http://localhost:4321/api/overnight/NVDA?startDate=2026-01-02&compound=true&amount=1000"
+      </div>
+      <details>
+        <summary style="cursor: pointer; font-size: 0.85rem; font-weight: 600; color: var(--accent-blue);">Example Response</summary>
+        <pre class="code-block">
+{
+  "ticker": "NVDA",
+  "startDate": "2026-01-02",
+  "startClosePrice": 142.10,
+  "latestDate": "2026-10-14",
+  "latestOpenPrice": 228.73,
+  "totalNights": 195,
+  "winningNights": 113,
+  "winRatePct": 57.95,
+  "compoundingEnabled": true,
+  "initialInvestment": 1000,
+  "finalValue": 1682.15,
+  "dollarGainLoss": 682.15,
+  "percentReturn": 68.22,
+  "source": "Yahoo Finance Proxy"
+}</pre>
+      </details>
+    </article>
+
+    <!-- Endpoint 2: Multi-Ticker POST -->
+    <article class="surface-card endpoint-card">
+      <div class="endpoint-header">
+        <span class="method-badge method-post">POST</span>
+        <span class="endpoint-path">/api/overnight</span>
+      </div>
+      <p class="intro-copy">
+        Calculates compounded overnight returns across a custom basket of stocks with optional custom per-stock allocations.
+      </p>
+      <div class="code-block">
+curl -s -X POST "http://localhost:4321/api/overnight" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "startDate": "2026-01-02",
+    "tickers": ["MU", "MRVL", "NVDA"],
+    "compound": true,
+    "investmentAmount": 1000,
+    "allocations": { "MU": 500, "MRVL": 300, "NVDA": 200 }
+  }'
+      </div>
+      <details>
+        <summary style="cursor: pointer; font-size: 0.85rem; font-weight: 600; color: var(--accent-blue);">Example Response</summary>
+        <pre class="code-block">
+{
+  "startDate": "2026-01-02",
+  "compoundingEnabled": true,
+  "portfolioSummary": {
+    "totalInvested": 1000.00,
+    "totalFinalValue": 2410.50,
+    "totalGainLoss": 1410.50,
+    "overallReturnPct": 141.05,
+    "stocksCount": 3
+  },
+  "breakdown": [
+    { "ticker": "MU", "invested": 500, "finalValue": 1420.50, "returnPct": 184.1 },
+    { "ticker": "MRVL", "invested": 300, "finalValue": 680.00, "returnPct": 126.6 },
+    { "ticker": "NVDA", "invested": 200, "finalValue": 310.00, "returnPct": 55.0 }
+  ]
+}</pre>
+      </details>
+    </article>
+
+    <!-- Endpoint 3: Top Performers -->
+    <article class="surface-card endpoint-card">
+      <div class="endpoint-header">
+        <span class="method-badge method-get">GET</span>
+        <span class="endpoint-path">/api/top-performers</span>
+      </div>
+      <p class="intro-copy">
+        Returns the top 10 ranked overnight drift equities and ETFs from our 1-year backtest simulation.
+      </p>
+      <div class="code-block">
+curl -s "http://localhost:4321/api/top-performers"
+      </div>
+    </article>
+
+    <!-- Endpoint 4: Portfolio Optimization -->
+    <article class="surface-card endpoint-card">
+      <div class="endpoint-header">
+        <span class="method-badge method-get">GET</span>
+        <span class="endpoint-path">/api/optimize?amount=1000</span>
+      </div>
+      <p class="intro-copy">
+        Returns the exact dollar and percentage allocation for the 100,000-trial Monte Carlo Optimal Balanced Overnight Portfolio.
+      </p>
+      <div class="code-block">
+curl -s "http://localhost:4321/api/optimize?amount=1000"
+      </div>
+    </article>
+
+    <!-- Code Examples in JS and Python -->
+    <section class="surface-card endpoint-card">
+      <h3 class="panel-title">Integration Code Snippets</h3>
+      
+      <p class="field-label">JavaScript (Node / Browser fetch):</p>
+      <pre class="code-block">
+const res = await fetch('https://your-domain.vercel.app/api/overnight/NVDA?startDate=2026-01-02');
+const data = await res.json();
+console.log(`NVDA Overnight Return: ${data.percentReturn}% | Final: $${data.finalValue}`);
+      </pre>
+
+      <p class="field-label">Python (requests):</p>
+      <pre class="code-block">
+import requests
+
+url = "https://your-domain.vercel.app/api/overnight"
+payload = {
+    "startDate": "2026-01-02",
+    "tickers": ["MU", "MRVL", "CAT", "NVDA"],
+    "compound": True,
+    "investmentAmount": 1000
+}
+res = requests.post(url, json=payload).json()
+print("Portfolio Final Value: $", res["portfolioSummary"]["totalFinalValue"])
+print("Overall Return: ", res["portfolioSummary"]["overallReturnPct"], "%")
+      </pre>
+    </section>
+  </main>
+</body>
+</html>
