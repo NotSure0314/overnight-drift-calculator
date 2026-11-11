@@ -277,6 +277,7 @@
         <span class="source-pill">Format: JSON</span>
         <span class="source-pill">Auth: None required</span>
         <span class="source-pill">CORS: All origins allowed</span>
+        <span class="source-pill">Caching: 15m bar cache + CDN <code>s-maxage=300</code></span>
       </div>
     </section>
 
@@ -332,6 +333,18 @@
               <td>Past US market trading day in <code>YYYY-MM-DD</code> format (cannot be a weekend or NYSE holiday).</td>
             </tr>
             <tr>
+              <td><code>endDate</code></td>
+              <td>string</td>
+              <td>Latest trading day</td>
+              <td>Optional end date (<code>YYYY-MM-DD</code>). Slices the simulation so the final sell occurs on the latest trading day open <code>&lt;= endDate</code>. Must be on or after the next trading day following <code>startDate</code>.</td>
+            </tr>
+            <tr>
+              <td><code>singleNight</code></td>
+              <td>boolean</td>
+              <td><code>false</code></td>
+              <td>When <code>true</code>, automatically stops after the very next trading day’s open following <code>startDate</code> (1 overnight round, even across weekends/holidays).</td>
+            </tr>
+            <tr>
               <td><code>amount</code> / <code>investmentAmount</code></td>
               <td>number</td>
               <td><code>1000</code></td>
@@ -364,11 +377,15 @@
         <button type="button" class="chip-btn" id="try-single-btn">Test Live Request</button>
       </div>
       <p class="intro-copy">
-        Calculates overnight drift returns for a single stock from <code>startDate</code> through the latest available market open.
+        Calculates overnight drift returns for a single stock from <code>startDate</code> through <code>endDate</code> (or the latest available market open when <code>endDate</code> is omitted). Pass <code>singleNight=true</code> to evaluate just the next trading day’s open.
       </p>
       <div class="code-wrap">
         <button type="button" class="copy-btn" data-copy-target="curl-single">Copy</button>
-        <pre class="code-block" id="curl-single">curl -s "<span class="origin-var">https://your-domain.vercel.app</span>/api/overnight/NVDA?startDate=2026-09-10&amp;compound=true&amp;amount=1000"</pre>
+        <pre class="code-block" id="curl-single">curl -s "<span class="origin-var">https://your-domain.vercel.app</span>/api/overnight/NVDA?startDate=2026-10-05&amp;endDate=2026-10-06&amp;compound=true&amp;amount=1000"</pre>
+      </div>
+      <div class="code-wrap">
+        <button type="button" class="copy-btn" data-copy-target="curl-single-night">Copy</button>
+        <pre class="code-block" id="curl-single-night">curl -s "<span class="origin-var">https://your-domain.vercel.app</span>/api/overnight/NVDA?startDate=2026-10-09&amp;singleNight=true&amp;amount=1000"</pre>
       </div>
       <pre class="try-output" id="try-single-output" hidden></pre>
       <details>
@@ -401,11 +418,11 @@
         </div>
       </div>
       <p class="intro-copy">
-        Quick browser-friendly endpoint to calculate an equal-split basket of multiple stocks using URL query parameters.
+        Quick browser-friendly endpoint to calculate an equal-split basket of multiple stocks using URL query parameters. Supports <code>endDate</code> and <code>singleNight=true</code> for custom training windows and 1-night rounds.
       </p>
       <div class="code-wrap">
         <button type="button" class="copy-btn" data-copy-target="curl-multi-get">Copy</button>
-        <pre class="code-block" id="curl-multi-get">curl -s "<span class="origin-var">https://your-domain.vercel.app</span>/api/overnight?tickers=MU,MRVL,NVDA&amp;startDate=2026-09-10&amp;compound=true&amp;amount=1000"</pre>
+        <pre class="code-block" id="curl-multi-get">curl -s "<span class="origin-var">https://your-domain.vercel.app</span>/api/overnight?tickers=MU,NVDA&amp;startDate=2026-10-05&amp;endDate=2026-10-06&amp;compound=true&amp;amount=1000"</pre>
       </div>
     </article>
 
@@ -418,14 +435,16 @@
         </div>
       </div>
       <p class="intro-copy">
-        Calculates a multi-stock portfolio with optional custom dollar allocations per ticker. (Also accepts <code>POST /api/overnight-returns</code>.)
+        Calculates a multi-stock portfolio with optional <code>endDate</code>, <code>singleNight</code>, and custom dollar allocations per ticker. (Also accepts <code>POST /api/overnight-returns</code>.)
       </p>
       <div class="code-wrap">
         <button type="button" class="copy-btn" data-copy-target="curl-multi-post">Copy</button>
         <pre class="code-block" id="curl-multi-post">curl -s -X POST "<span class="origin-var">https://your-domain.vercel.app</span>/api/overnight" \
   -H "Content-Type: application/json" \
   -d '{
-    "startDate": "2026-09-10",
+    "startDate": "2026-10-05",
+    "endDate": "2026-10-06",
+    "singleNight": false,
     "tickers": ["MU", "MRVL", "NVDA"],
     "compound": true,
     "investmentAmount": 1000,
@@ -555,12 +574,12 @@ print("Return %:", res["portfolioSummary"]["overallReturnPct"])</pre>
             <tr>
               <td><code>422</code></td>
               <td>No Trading Data</td>
-              <td>No bars on <code>startDate</code>, or <code>startDate</code> is the latest day with no next-day open yet.</td>
+              <td>No bars on <code>startDate</code>, <code>endDate</code> is earlier than the next trading day open, or <code>startDate</code> is the latest day with no next-day open yet.</td>
             </tr>
             <tr>
               <td><code>429</code></td>
               <td>Rate Limit Exceeded</td>
-              <td>Upstream data provider rate limit hit; wait a moment and retry.</td>
+              <td>Upstream data provider throttled and no cached bars exist; includes <code>Retry-After</code> header and <code>retryAfterSeconds</code>.</td>
             </tr>
           </tbody>
         </table>

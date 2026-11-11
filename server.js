@@ -25,9 +25,12 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// In-memory response cache to minimize API rate limit hits
-const quoteCache = new Map();
-const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+// Server-side daily OHLC bar cache + in-flight deduplication to prevent upstream 429 throttling
+const barsCache = new Map();
+const inFlightBarFetches = new Map();
+const BARS_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const DEFAULT_LOOKBACK_DAYS = 730; // ~2 years fetched once per ticker for local date slicing
+const GET_CACHE_CONTROL = 's-maxage=300, stale-while-revalidate=600';
 
 // US NYSE Market Holidays (2024 - 2026)
 const US_MARKET_HOLIDAYS = new Set([
@@ -70,6 +73,25 @@ const OPTIMAL_ALLOCATION_WEIGHTS = {
   AMAT: 0.01
 };
 
+function isValidIsoDate(dateStr) {
+  if (typeof dateStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return false;
+  }
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m - 1 &&
+    dt.getUTCDate() === d
+  );
+}
+
+function shiftIsoDate(dateStr, deltaDays) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + deltaDays));
+  return dt.toISOString().slice(0, 10);
+}
+
 function isWeekend(dateStr) {
   const [y, m, d] = dateStr.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
@@ -79,6 +101,14 @@ function isWeekend(dateStr) {
 
 function isTradingDay(dateStr) {
   return !isWeekend(dateStr) && !US_MARKET_HOLIDAYS.has(dateStr);
+}
+
+function getNextTradingDay(dateStr) {
+  let cursor = shiftIsoDate(dateStr, 1);
+  while (!isTradingDay(cursor)) {
+    cursor = shiftIsoDate(cursor, 1);
+  }
+  return cursor;
 }
 
 function getDefaultTradingDate(daysBack = 21) {
@@ -93,6 +123,70 @@ function getDefaultTradingDate(daysBack = 21) {
   return cursor.toISOString().slice(0, 10);
 }
 
+function parseBooleanFlag(val, defaultValue = false) {
+  if (val === undefined || val === null || val === '') return defaultValue;
+  if (typeof val === 'boolean') return val;
+  const normalized = String(val).trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1') return true;
+  if (normalized === 'false' || normalized === '0') return false;
+  return defaultValue;
+}
+
+function validateDateRange(startDate, endDate) {
+  if (!isValidIsoDate(startDate)) {
+    return { status: 400, error: 'Please provide a valid startDate in YYYY-MM-DD format.' };
+  }
+  if (isWeekend(startDate)) {
+    return {
+      status: 400,
+      error: `${startDate} falls on a weekend. Please select a valid past market trading day (Monday–Friday).`
+    };
+  }
+  if (US_MARKET_HOLIDAYS.has(startDate)) {
+    return {
+      status: 400,
+      error: `${startDate} is a US stock market holiday. Please select an active trading day.`
+    };
+  }
+
+  if (endDate !== undefined && endDate !== null && endDate !== '') {
+    if (!isValidIsoDate(endDate)) {
+      return { status: 400, error: 'Please provide a valid endDate in YYYY-MM-DD format.' };
+    }
+    const nextTradingDay = getNextTradingDay(startDate);
+    if (endDate < nextTradingDay) {
+      return {
+        status: 422,
+        error: `No sell open exists on or before ${endDate}; endDate must be on or after the next trading day following ${startDate} (${nextTradingDay}).`
+      };
+    }
+  }
+
+  return null;
+}
+
+function createRateLimitError(message, retryAfterHeader) {
+  const err = new Error(message);
+  err.status = 429;
+  const parsed = Number(retryAfterHeader);
+  err.retryAfterSeconds = Number.isFinite(parsed) && parsed > 0 ? Math.ceil(parsed) : 60;
+  return err;
+}
+
+function normalizeBars(bars) {
+  const byDate = new Map();
+  for (const bar of bars) {
+    if (bar && bar.date && Number.isFinite(bar.open) && Number.isFinite(bar.close)) {
+      byDate.set(bar.date, {
+        date: bar.date,
+        open: Number(bar.open),
+        close: Number(bar.close)
+      });
+    }
+  }
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
 /**
  * Fetch daily bars from Polygon.io
  */
@@ -101,9 +195,10 @@ async function fetchFromPolygon(ticker, startDate, endDate, apiKey) {
   const res = await fetch(url);
 
   if (res.status === 429) {
-    const err = new Error('Polygon.io API rate limit exceeded (5 requests/min on free tier). Please wait 60 seconds and try again.');
-    err.status = 429;
-    throw err;
+    throw createRateLimitError(
+      'Polygon.io API rate limit exceeded (5 requests/min on free tier). Please wait and retry.',
+      res.headers.get('retry-after')
+    );
   }
 
   if (res.status === 401 || res.status === 403) {
@@ -121,11 +216,13 @@ async function fetchFromPolygon(ticker, startDate, endDate, apiKey) {
     return [];
   }
 
-  return data.results.map((bar) => ({
-    date: new Date(bar.t).toISOString().slice(0, 10),
-    open: Number(bar.o),
-    close: Number(bar.c)
-  }));
+  return normalizeBars(
+    data.results.map((bar) => ({
+      date: new Date(bar.t).toISOString().slice(0, 10),
+      open: Number(bar.o),
+      close: Number(bar.c)
+    }))
+  );
 }
 
 /**
@@ -136,16 +233,15 @@ async function fetchFromAlphaVantage(ticker, startDate, apiKey) {
   const res = await fetch(url);
 
   if (res.status === 429) {
-    const err = new Error('Alpha Vantage API rate limit reached. Please wait a moment and retry.');
-    err.status = 429;
-    throw err;
+    throw createRateLimitError(
+      'Alpha Vantage API rate limit reached. Please wait a moment and retry.',
+      res.headers.get('retry-after')
+    );
   }
 
   const data = await res.json();
   if (data['Note'] || data['Information']) {
-    const err = new Error(data['Note'] || data['Information']);
-    err.status = 429;
-    throw err;
+    throw createRateLimitError(data['Note'] || data['Information'], res.headers.get('retry-after'));
   }
 
   if (data['Error Message']) {
@@ -157,14 +253,15 @@ async function fetchFromAlphaVantage(ticker, startDate, apiKey) {
   const series = data['Time Series (Daily)'];
   if (!series) return [];
 
-  return Object.entries(series)
-    .filter(([date]) => date >= startDate)
-    .map(([date, vals]) => ({
-      date,
-      open: Number(vals['1. open']),
-      close: Number(vals['4. close'])
-    }))
-    .sort((a, b) => a.date.localeCompare(b.date));
+  return normalizeBars(
+    Object.entries(series)
+      .filter(([date]) => date >= startDate)
+      .map(([date, vals]) => ({
+        date,
+        open: Number(vals['1. open']),
+        close: Number(vals['4. close'])
+      }))
+  );
 }
 
 /**
@@ -182,9 +279,10 @@ async function fetchFromYahoo(ticker, startDate, endDate) {
   });
 
   if (res.status === 429) {
-    const err = new Error('Market data rate limit reached. Please wait a moment before retrying.');
-    err.status = 429;
-    throw err;
+    throw createRateLimitError(
+      'Yahoo Finance rate limit reached (429). Please retry after the cooldown period.',
+      res.headers.get('retry-after')
+    );
   }
 
   if (res.status === 404) {
@@ -222,45 +320,127 @@ async function fetchFromYahoo(ticker, startDate, endDate) {
     }
   }
 
-  return bars;
+  return normalizeBars(bars);
 }
 
-/**
- * Compute daily Close-to-Open overnight returns from startDate up to current trading day.
- */
-async function getOvernightSeriesForTicker(ticker, startDate) {
-  const upperTicker = ticker.trim().toUpperCase();
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const cacheKey = `${upperTicker}:${startDate}:${todayIso}`;
-
-  const cached = quoteCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-    return cached.data;
-  }
-
+function resolveProviderConfig() {
   const polygonKey = process.env.POLYGON_API_KEY;
   const alphaKey = process.env.ALPHAVANTAGE_API_KEY;
   const preferred = (process.env.MARKET_DATA_PROVIDER || 'polygon').toLowerCase();
 
-  let bars = [];
-  let sourceUsed = '';
-
   if (preferred === 'polygon' && polygonKey && polygonKey !== 'your_polygon_api_key_here') {
-    bars = await fetchFromPolygon(upperTicker, startDate, todayIso, polygonKey);
-    sourceUsed = 'Polygon.io';
-  } else if (preferred === 'alphavantage' && alphaKey && alphaKey !== 'your_alphavantage_api_key_here') {
-    bars = await fetchFromAlphaVantage(upperTicker, startDate, alphaKey);
-    sourceUsed = 'Alpha Vantage';
-  } else if (polygonKey && polygonKey !== 'your_polygon_api_key_here') {
-    bars = await fetchFromPolygon(upperTicker, startDate, todayIso, polygonKey);
-    sourceUsed = 'Polygon.io';
-  } else if (alphaKey && alphaKey !== 'your_alphavantage_api_key_here') {
-    bars = await fetchFromAlphaVantage(upperTicker, startDate, alphaKey);
-    sourceUsed = 'Alpha Vantage';
-  } else {
-    bars = await fetchFromYahoo(upperTicker, startDate, todayIso);
-    sourceUsed = 'Yahoo Finance Proxy';
+    return { provider: 'polygon', sourceLabel: 'Polygon.io', apiKey: polygonKey };
   }
+  if (preferred === 'alphavantage' && alphaKey && alphaKey !== 'your_alphavantage_api_key_here') {
+    return { provider: 'alphavantage', sourceLabel: 'Alpha Vantage', apiKey: alphaKey };
+  }
+  if (polygonKey && polygonKey !== 'your_polygon_api_key_here') {
+    return { provider: 'polygon', sourceLabel: 'Polygon.io', apiKey: polygonKey };
+  }
+  if (alphaKey && alphaKey !== 'your_alphavantage_api_key_here') {
+    return { provider: 'alphavantage', sourceLabel: 'Alpha Vantage', apiKey: alphaKey };
+  }
+  return { provider: 'yahoo', sourceLabel: 'Yahoo Finance Proxy', apiKey: null };
+}
+
+/**
+ * Fetch and cache full daily OHLC bars per ticker so rapid date-range slices run locally in memory.
+ */
+async function getDailyBarsForTicker(ticker, requiredStartDate, requiredEndDate = null) {
+  const upperTicker = ticker.trim().toUpperCase();
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const { provider, sourceLabel, apiKey } = resolveProviderConfig();
+  const cacheKey = `${provider}:${upperTicker}`;
+
+  const cached = barsCache.get(cacheKey);
+  const isFresh = cached && Date.now() - cached.fetchedAt < BARS_CACHE_TTL_MS;
+  const coversStart = cached && cached.coveredFrom <= requiredStartDate;
+  const coversEnd =
+    !requiredEndDate ||
+    (cached && (cached.coveredTo >= requiredEndDate || cached.coveredTo >= todayIso));
+
+  if (isFresh && coversStart && coversEnd) {
+    return {
+      bars: cached.bars,
+      source: cached.source,
+      cached: true,
+      staleFallback: false
+    };
+  }
+
+  const defaultStart = shiftIsoDate(todayIso, -DEFAULT_LOOKBACK_DAYS);
+  const fetchStart = requiredStartDate < defaultStart ? requiredStartDate : defaultStart;
+  const effectiveFetchStart =
+    cached && cached.coveredFrom < fetchStart ? cached.coveredFrom : fetchStart;
+  const inFlightKey = `${cacheKey}:${effectiveFetchStart}:${todayIso}`;
+
+  let fetchPromise = inFlightBarFetches.get(inFlightKey);
+  if (!fetchPromise) {
+    fetchPromise = (async () => {
+      let bars = [];
+      if (provider === 'polygon') {
+        bars = await fetchFromPolygon(upperTicker, effectiveFetchStart, todayIso, apiKey);
+      } else if (provider === 'alphavantage') {
+        bars = await fetchFromAlphaVantage(upperTicker, effectiveFetchStart, apiKey);
+      } else {
+        bars = await fetchFromYahoo(upperTicker, effectiveFetchStart, todayIso);
+      }
+
+      const entry = {
+        bars,
+        source: sourceLabel,
+        coveredFrom: effectiveFetchStart,
+        coveredTo: todayIso,
+        fetchedAt: Date.now()
+      };
+      barsCache.set(cacheKey, entry);
+      return entry;
+    })().finally(() => {
+      inFlightBarFetches.delete(inFlightKey);
+    });
+
+    inFlightBarFetches.set(inFlightKey, fetchPromise);
+  }
+
+  try {
+    const entry = await fetchPromise;
+    return {
+      bars: entry.bars,
+      source: entry.source,
+      cached: false,
+      staleFallback: false
+    };
+  } catch (err) {
+    // Serve stale cached bars on 429 or transient upstream failures if the requested range is covered
+    if (
+      cached &&
+      coversStart &&
+      (err.status === 429 || !err.status || err.status >= 500)
+    ) {
+      return {
+        bars: cached.bars,
+        source: `${cached.source} (stale cache)`,
+        cached: true,
+        staleFallback: true
+      };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Compute daily Close-to-Open overnight returns from startDate up to endDate (or latest trading day).
+ * Supports singleNight=true to stop after the very next trading day's open following startDate.
+ */
+async function getOvernightSeriesForTicker(ticker, startDate, options = {}) {
+  const upperTicker = ticker.trim().toUpperCase();
+  const { endDate = null, singleNight = false } = options;
+
+  const { bars, source, cached, staleFallback } = await getDailyBarsForTicker(
+    upperTicker,
+    startDate,
+    endDate
+  );
 
   const buyIndex = bars.findIndex((b) => b.date === startDate);
   if (buyIndex === -1) {
@@ -281,7 +461,38 @@ async function getOvernightSeriesForTicker(ticker, startDate) {
     throw err;
   }
 
-  const activeBars = bars.slice(buyIndex);
+  let sellIndex = bars.length - 1;
+
+  if (singleNight) {
+    const nextBarIndex = buyIndex + 1;
+    if (endDate && bars[nextBarIndex].date > endDate) {
+      const err = new Error(
+        `No sell open exists for ${upperTicker} on or before ${endDate} (next trading day after ${startDate} is ${bars[nextBarIndex].date}).`
+      );
+      err.status = 422;
+      err.code = 'NO_SELL_OPEN_IN_RANGE';
+      throw err;
+    }
+    sellIndex = nextBarIndex;
+  } else if (endDate) {
+    sellIndex = -1;
+    for (let i = bars.length - 1; i > buyIndex; i--) {
+      if (bars[i].date <= endDate) {
+        sellIndex = i;
+        break;
+      }
+    }
+    if (sellIndex <= buyIndex) {
+      const err = new Error(
+        `No sell open exists for ${upperTicker} on or before ${endDate} following ${startDate}.`
+      );
+      err.status = 422;
+      err.code = 'NO_SELL_OPEN_IN_RANGE';
+      throw err;
+    }
+  }
+
+  const activeBars = bars.slice(buyIndex, sellIndex + 1);
   const firstBar = activeBars[0];
   const lastBar = activeBars[activeBars.length - 1];
   const prevToLastBar = activeBars[activeBars.length - 2];
@@ -302,7 +513,7 @@ async function getOvernightSeriesForTicker(ticker, startDate) {
 
   const simpleMultiplier = 1.0 + simpleReturnSum;
 
-  const payload = {
+  return {
     ticker: upperTicker,
     buyDate: firstBar.date,
     closePrice: firstBar.close,
@@ -314,11 +525,10 @@ async function getOvernightSeriesForTicker(ticker, startDate) {
     winRatePct: totalNights > 0 ? (winningNights / totalNights) * 100 : 0,
     compoundedMultiplier,
     simpleMultiplier,
-    source: sourceUsed
+    source,
+    cached,
+    staleFallback
   };
-
-  quoteCache.set(cacheKey, { timestamp: Date.now(), data: payload });
-  return payload;
 }
 
 // ============================================================================
@@ -339,7 +549,7 @@ app.get(['/api/status', '/api/health', '/api/config-status'], (_req, res) => {
 
   res.json({
     status: 'ok',
-    version: '1.0.0',
+    version: '1.1.0',
     timestamp: new Date().toISOString(),
     configuredProvider: hasPolygon
       ? 'Polygon.io (.env)'
@@ -347,10 +557,14 @@ app.get(['/api/status', '/api/health', '/api/config-status'], (_req, res) => {
       ? 'Alpha Vantage (.env)'
       : 'Yahoo Finance Proxy (Server-side fallback)',
     hasEnvApiKey: hasPolygon || hasAlpha,
+    cache: {
+      cachedTickers: barsCache.size,
+      ttlMinutes: BARS_CACHE_TTL_MS / 60000
+    },
     endpoints: {
-      singleTicker: 'GET /api/overnight/:ticker',
-      multiTickerGet: 'GET /api/overnight?tickers=NVDA,MU&startDate=YYYY-MM-DD',
-      multiTickerPost: 'POST /api/overnight',
+      singleTicker: 'GET /api/overnight/:ticker?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&singleNight=false',
+      multiTickerGet: 'GET /api/overnight?tickers=NVDA,MU&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD',
+      multiTickerPost: 'POST /api/overnight (and POST /api/overnight-returns)',
       topPerformers: 'GET /api/top-performers',
       portfolioOptimize: 'GET /api/optimize?amount=1000'
     }
@@ -362,6 +576,7 @@ app.get(['/api/status', '/api/health', '/api/config-status'], (_req, res) => {
  * GET /api/top-performers
  */
 app.get('/api/top-performers', (_req, res) => {
+  res.set('Cache-Control', GET_CACHE_CONTROL);
   res.json({
     description: 'Top 10 overnight drift performers ranked by 1-year compounded Close-to-Next-Open returns',
     period: 'Past 250 trading nights',
@@ -377,7 +592,7 @@ app.get('/api/top-performers', (_req, res) => {
  */
 app.all('/api/optimize', (req, res) => {
   const totalAmount = parseFloat(req.query.amount || req.body?.amount || 1000);
-  if (isNaN(totalAmount) || totalAmount < 1) {
+  if (!Number.isFinite(totalAmount) || totalAmount < 1) {
     return res.status(400).json({ error: 'amount must be a positive number of at least $1.00' });
   }
 
@@ -385,7 +600,7 @@ app.all('/api/optimize', (req, res) => {
   let allocatedSum = 0;
 
   for (const [ticker, weight] of Object.entries(OPTIMAL_ALLOCATION_WEIGHTS)) {
-    const dollars = Math.round((weight * totalAmount) * 100) / 100;
+    const dollars = Math.round(weight * totalAmount * 100) / 100;
     allocations[ticker] = {
       dollars,
       weightPct: Number((weight * 100).toFixed(1))
@@ -397,6 +612,10 @@ app.all('/api/optimize', (req, res) => {
   const diff = Number((totalAmount - allocatedSum).toFixed(2));
   if (diff !== 0) {
     allocations['MU'].dollars = Number((allocations['MU'].dollars + diff).toFixed(2));
+  }
+
+  if (req.method === 'GET') {
+    res.set('Cache-Control', GET_CACHE_CONTROL);
   }
 
   res.json({
@@ -425,48 +644,72 @@ app.get('/api/overnight/:ticker', async (req, res) => {
     }
 
     const startDate = req.query.startDate || getDefaultTradingDate(21);
-    const compound = req.query.compound !== 'false';
-    const amount = parseFloat(req.query.amount || req.query.investment || 1000);
+    const endDate = req.query.endDate ? String(req.query.endDate).trim() : null;
+    const singleNight = parseBooleanFlag(req.query.singleNight, false);
+    const compound = parseBooleanFlag(req.query.compound, true);
+    const amount = parseFloat(req.query.amount ?? req.query.investment ?? 1000);
 
-    if (isWeekend(startDate) || US_MARKET_HOLIDAYS.has(startDate)) {
-      return res.status(400).json({ error: `${startDate} is not an active US market trading day.` });
+    if (!Number.isFinite(amount) || amount < 1) {
+      return res.status(400).json({ error: 'amount must be a positive number of at least $1.00.' });
     }
 
-    const data = await getOvernightSeriesForTicker(ticker, startDate);
+    const dateError = validateDateRange(startDate, endDate);
+    if (dateError) {
+      return res.status(dateError.status).json({ error: dateError.error });
+    }
+
+    const data = await getOvernightSeriesForTicker(ticker, startDate, { endDate, singleNight });
     const mult = compound ? data.compoundedMultiplier : data.simpleMultiplier;
     const finalValue = Number((amount * mult).toFixed(2));
     const dollarGainLoss = Number((finalValue - amount).toFixed(2));
     const percentReturn = Number((((finalValue - amount) / amount) * 100).toFixed(2));
 
+    res.set('Cache-Control', GET_CACHE_CONTROL);
     res.json({
       ticker: data.ticker,
       startDate: data.buyDate,
       startClosePrice: data.closePrice,
+      endDate: data.sellDate,
+      sellDate: data.sellDate,
       latestDate: data.sellDate,
       latestOpenPrice: data.openPrice,
+      sellOpenPrice: data.openPrice,
       totalNights: data.totalNights,
       winningNights: data.winningNights,
       winRatePct: Number(data.winRatePct.toFixed(2)),
       compoundingEnabled: compound,
+      singleNight,
       initialInvestment: amount,
       finalValue,
       dollarGainLoss,
       percentReturn,
-      source: data.source
+      compoundedMultiplier: data.compoundedMultiplier,
+      simpleMultiplier: data.simpleMultiplier,
+      source: data.source,
+      cached: data.cached,
+      staleFallback: data.staleFallback
     });
   } catch (err) {
+    res.set('Cache-Control', 'no-store');
+    if (err.status === 429) {
+      const retryAfter = err.retryAfterSeconds || 60;
+      res.set('Retry-After', String(retryAfter));
+      return res.status(429).json({ error: err.message, retryAfterSeconds: retryAfter });
+    }
     res.status(err.status || 500).json({ error: err.message });
   }
 });
 
 /**
  * 5. Multi-Ticker Handler (GET & POST)
- * GET /api/overnight?tickers=NVDA,MU,TSM&startDate=YYYY-MM-DD&compound=true&amount=1000
+ * GET /api/overnight?tickers=NVDA,MU,TSM&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&singleNight=false&compound=true&amount=1000
  * POST /api/overnight or POST /api/overnight-returns
  */
 async function handleOvernightCalculation(req, res) {
   try {
     let startDate = '';
+    let endDate = null;
+    let singleNight = false;
     let tickers = [];
     let compound = true;
     let totalInvestment = 1000;
@@ -474,32 +717,32 @@ async function handleOvernightCalculation(req, res) {
 
     if (req.method === 'GET') {
       startDate = req.query.startDate || getDefaultTradingDate(21);
-      tickers = (req.query.tickers || 'VOO,NVDA,MU,AMZN,AMD,INTC,XOM').split(',').map(s => s.trim());
-      compound = req.query.compound !== 'false';
-      totalInvestment = parseFloat(req.query.amount || req.query.investment || 1000);
+      endDate = req.query.endDate ? String(req.query.endDate).trim() : null;
+      singleNight = parseBooleanFlag(req.query.singleNight, false);
+      tickers = (req.query.tickers || 'VOO,NVDA,MU,AMZN,AMD,INTC,XOM')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      compound = parseBooleanFlag(req.query.compound, true);
+      totalInvestment = parseFloat(req.query.amount ?? req.query.investment ?? 1000);
     } else {
       const body = req.body || {};
       startDate = body.startDate || getDefaultTradingDate(21);
+      endDate = body.endDate ? String(body.endDate).trim() : null;
+      singleNight = parseBooleanFlag(body.singleNight, false);
       tickers = body.tickers || [];
-      compound = body.compound !== false;
-      totalInvestment = parseFloat(body.investmentAmount || 1000);
+      compound = parseBooleanFlag(body.compound, true);
+      totalInvestment = parseFloat(body.investmentAmount ?? body.amount ?? 1000);
       customAllocations = body.allocations || null;
     }
 
-    if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
-      return res.status(400).json({ error: 'Please provide a valid start date in YYYY-MM-DD format.' });
+    if (!Number.isFinite(totalInvestment) || totalInvestment < 1) {
+      return res.status(400).json({ error: 'Investment amount must be a positive number of at least $1.00.' });
     }
 
-    if (isWeekend(startDate)) {
-      return res.status(400).json({
-        error: `${startDate} falls on a weekend. Please select a valid past market trading day (Monday–Friday).`
-      });
-    }
-
-    if (US_MARKET_HOLIDAYS.has(startDate)) {
-      return res.status(400).json({
-        error: `${startDate} is a US stock market holiday. Please select an active trading day.`
-      });
+    const dateError = validateDateRange(startDate, endDate);
+    if (dateError) {
+      return res.status(dateError.status).json({ error: dateError.error });
     }
 
     if (!Array.isArray(tickers) || tickers.length === 0) {
@@ -518,11 +761,21 @@ async function handleOvernightCalculation(req, res) {
 
     for (const ticker of sanitizedTickers) {
       try {
-        const series = await getOvernightSeriesForTicker(ticker, startDate);
+        const series = await getOvernightSeriesForTicker(ticker, startDate, {
+          endDate,
+          singleNight
+        });
         results.push(series);
       } catch (tickerErr) {
         if (tickerErr.status === 429) {
-          return res.status(429).json({ error: tickerErr.message, partialResults: results });
+          const retryAfter = tickerErr.retryAfterSeconds || 60;
+          res.set('Cache-Control', 'no-store');
+          res.set('Retry-After', String(retryAfter));
+          return res.status(429).json({
+            error: tickerErr.message,
+            retryAfterSeconds: retryAfter,
+            partialResults: results
+          });
         }
         errors.push({
           ticker,
@@ -541,10 +794,11 @@ async function handleOvernightCalculation(req, res) {
     let portfolioInvested = 0;
     let portfolioFinalValue = 0;
 
-    const breakdown = results.map(item => {
-      const stockInvested = customAllocations && customAllocations[item.ticker] != null
-        ? Number(customAllocations[item.ticker])
-        : perStockDefault;
+    const breakdown = results.map((item) => {
+      const stockInvested =
+        customAllocations && customAllocations[item.ticker] != null
+          ? Number(customAllocations[item.ticker])
+          : perStockDefault;
 
       const mult = compound ? item.compoundedMultiplier : item.simpleMultiplier;
       const finalVal = Number((stockInvested * mult).toFixed(2));
@@ -565,17 +819,26 @@ async function handleOvernightCalculation(req, res) {
         invested: stockInvested,
         finalValue: finalVal,
         gainLoss: pnl,
-        returnPct: retPct
+        returnPct: retPct,
+        compoundedMultiplier: item.compoundedMultiplier,
+        simpleMultiplier: item.simpleMultiplier
       };
     });
 
     const totalGainLoss = Number((portfolioFinalValue - portfolioInvested).toFixed(2));
-    const totalReturnPct = portfolioInvested > 0 
-      ? Number(((totalGainLoss / portfolioInvested) * 100).toFixed(2)) 
-      : 0;
+    const totalReturnPct =
+      portfolioInvested > 0
+        ? Number(((totalGainLoss / portfolioInvested) * 100).toFixed(2))
+        : 0;
+
+    if (req.method === 'GET') {
+      res.set('Cache-Control', GET_CACHE_CONTROL);
+    }
 
     return res.json({
       startDate,
+      endDate: results[0]?.sellDate || endDate || null,
+      singleNight,
       compoundingEnabled: compound,
       portfolioSummary: {
         totalInvested: Number(portfolioInvested.toFixed(2)),
@@ -589,6 +852,7 @@ async function handleOvernightCalculation(req, res) {
       errors
     });
   } catch (err) {
+    res.set('Cache-Control', 'no-store');
     return res.status(500).json({ error: err.message || 'Unexpected server error.' });
   }
 }
