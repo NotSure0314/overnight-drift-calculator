@@ -2,8 +2,12 @@
   "version": 2,
   "rewrites": [
     {
+      "source": "/doc",
+      "destination": "/doc.html"
+    },
+    {
       "source": "/docs",
-      "destination": "/docs.html"
+      "destination": "/doc.html"
     },
     {
       "source": "/api/(.*)",

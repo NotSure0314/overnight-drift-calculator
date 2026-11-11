@@ -598,10 +598,10 @@ app.post(['/api/overnight', '/api/overnight-returns'], handleOvernightCalculatio
 
 /**
  * 6. Interactive API Documentation
- * GET /docs or GET /api/docs
+ * GET /doc, /docs, /api/doc, or /api/docs
  */
-app.get(['/docs', '/api/docs'], (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'docs.html'));
+app.get(['/doc', '/docs', '/api/doc', '/api/docs'], (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'doc.html'));
 });
 
 if (!process.env.VERCEL) {
